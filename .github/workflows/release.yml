@@ -94,22 +94,17 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: artifacts
+          merge-multiple: true
 
       - name: Create checksums
         run: |
           cd artifacts
-          for dir in */; do
-            file=$(ls "$dir")
-            mv "$dir$file" .
-          done
-          rmdir */
           sha256sum * > checksums-sha256.txt
           cat checksums-sha256.txt
 
       - name: Upload to release
         uses: softprops/action-gh-release@v2
         with:
-          files: |
-            artifacts/*
+          files: artifacts/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
