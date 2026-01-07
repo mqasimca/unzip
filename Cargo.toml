@@ -7,13 +7,14 @@ license = "MIT"
 authors = ["Your Name"]
 
 [dependencies]
-zip = "2.2"
+zip = { version = "2.2", features = ["aes-crypto"] }
 clap = { version = "4.5", features = ["derive"] }
 anyhow = "1.0"
 indicatif = "0.17"
 memmap2 = "0.9"
 filetime = "0.2"
 crc32fast = "1.4"
+rpassword = "7.3"
 
 # Linux-specific optimizations
 [target.'cfg(target_os = "linux")'.dependencies]

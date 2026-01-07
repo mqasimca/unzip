@@ -196,6 +196,7 @@ mod tests {
             test: true,
             pipe: false,
             comment_only: false,
+            zipinfo: None,
             overwrite: false,
             never_overwrite: false,
             freshen: false,
@@ -203,8 +204,10 @@ mod tests {
             junk_paths: false,
             case_insensitive: false,
             lowercase: false,
+            no_timestamps: false,
             quiet: 2, // Suppress output in tests
             threads: None,
+            password: None,
             patterns: vec![],
             exclude: vec![],
         }

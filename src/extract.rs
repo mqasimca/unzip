@@ -29,16 +29,18 @@
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use indicatif::{ProgressBar, ProgressStyle};
 use std::fs::{self, File};
 use std::io::{self, BufWriter, Read, Seek, Write};
 use std::path::PathBuf;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use zip::ZipArchive;
 
 use crate::args::Args;
 use crate::linux::{fadvise_dontneed, preallocate_file};
+use crate::password::{get_password, is_password_error, prompt_for_password};
 use crate::utils::{datetime_to_filetime, datetime_to_system_time, format_size, should_extract};
 
 /// Buffer size for file I/O (256KB for better throughput)
@@ -62,6 +64,7 @@ enum OverwriteDecision {
 /// * `outpath` - Path to the extracted file
 /// * `modified_time` - Optional modification time from archive
 /// * `unix_mode` - Optional Unix permissions mode
+/// * `no_timestamps` - Skip timestamp restoration if true
 ///
 /// # Errors
 ///
@@ -70,8 +73,9 @@ fn finalize_extracted_file(
     outpath: &std::path::Path,
     modified_time: Option<zip::DateTime>,
     unix_mode: Option<u32>,
+    no_timestamps: bool,
 ) {
-    if let Some(dt) = modified_time {
+    if !no_timestamps && let Some(dt) = modified_time {
         let mtime = datetime_to_filetime(dt);
         filetime::set_file_mtime(outpath, mtime).ok();
     }
@@ -223,16 +227,64 @@ pub fn extract_to_pipe<R: Read + Seek>(archive: &mut ZipArchive<R>, args: &Args)
     let stdout = io::stdout();
     let mut stdout_lock = stdout.lock();
 
-    for i in 0..archive.len() {
-        let mut file = archive.by_index(i)?;
-        let name = file.name().to_string();
+    let password = Mutex::new(get_password(args.password.as_deref(), args.quiet)?);
 
-        if file.is_dir() {
+    for i in 0..archive.len() {
+        // First, get file info without extracting
+        let is_dir = {
+            let f = archive.by_index(i)?;
+            f.is_dir()
+        };
+
+        if is_dir {
             continue;
         }
 
+        let name = {
+            let f = archive.by_index(i)?;
+            f.name().to_string()
+        };
+
         if !should_extract(&name, &args.patterns, &args.exclude, args.case_insensitive) {
             continue;
+        }
+
+        // Try to extract file - handle encryption
+        let mut file;
+        let result = archive.by_index(i);
+        if let Ok(f) = result {
+            file = f;
+        } else {
+            // Extract error information before dropping result
+            let err_str = match &result {
+                Err(e) => e.to_string(),
+                Ok(_) => unreachable!(),
+            };
+            let is_pwd_error = is_password_error(&err_str);
+            drop(result); // Drop result to release the borrow
+
+            if is_pwd_error {
+                // Error is password-related, need to decrypt
+                let mut pwd = password.lock().unwrap();
+                if pwd.is_none() {
+                    if args.quiet == 0 {
+                        eprintln!("Encrypted file detected: {}", name);
+                    }
+                    *pwd = Some(prompt_for_password()?);
+                }
+                let pwd_bytes = pwd.clone();
+                drop(pwd);
+
+                if let Some(ref pwd) = pwd_bytes {
+                    file = archive
+                        .by_index_decrypt(i, pwd)
+                        .with_context(|| format!("Failed to decrypt {}", name))?;
+                } else {
+                    bail!("Password required but not available for file: {}", name);
+                }
+            } else {
+                bail!("Failed to read file: {}", name);
+            }
         }
 
         io::copy(&mut file, &mut stdout_lock)
@@ -302,6 +354,8 @@ pub fn extract_archive<R: Read + Seek>(archive: &mut ZipArchive<R>, args: &Args)
     let skipped = AtomicUsize::new(0);
     let total_bytes = AtomicU64::new(0);
 
+    let password = Mutex::new(get_password(args.password.as_deref(), args.quiet)?);
+
     let progress_bar = if args.quiet == 0 {
         let pb = ProgressBar::new(total_files as u64);
         pb.set_style(
@@ -327,8 +381,11 @@ pub fn extract_archive<R: Read + Seek>(archive: &mut ZipArchive<R>, args: &Args)
         file_infos.push((i, name, is_dir, size, mtime));
     }
 
+    // Track directories for timestamp restoration after extraction
+    let mut directories: Vec<(PathBuf, Option<zip::DateTime>)> = Vec::new();
+
     // Must be sequential to avoid race conditions when creating nested directories
-    for (_, name, is_dir, _, _) in &file_infos {
+    for (_, name, is_dir, _, mtime) in &file_infos {
         if !*is_dir {
             continue;
         }
@@ -346,11 +403,14 @@ pub fn extract_archive<R: Read + Seek>(archive: &mut ZipArchive<R>, args: &Args)
 
         fs::create_dir_all(&outpath)
             .with_context(|| format!("Failed to create directory: {}", outpath.display()))?;
+
+        // Track directory for later timestamp restoration
+        directories.push((outpath, *mtime));
     }
 
     let mut buffer = vec![0u8; BUFFER_SIZE];
 
-    for (i, name, is_dir, size, mtime) in file_infos {
+    'main_loop: for (i, name, is_dir, size, mtime) in file_infos {
         if is_dir {
             if let Some(ref pb) = progress_bar {
                 pb.inc(1);
@@ -366,7 +426,73 @@ pub fn extract_archive<R: Read + Seek>(archive: &mut ZipArchive<R>, args: &Args)
             continue;
         }
 
-        let mut file = archive.by_index(i)?;
+        // Try to extract file - handle encryption
+        let mut file;
+        let result = archive.by_index(i);
+        if let Ok(f) = result {
+            file = f;
+        } else {
+            // Extract error information before dropping result
+            let err_str = match &result {
+                Err(e) => e.to_string(),
+                Ok(_) => unreachable!(),
+            };
+            let is_pwd_error = is_password_error(&err_str);
+            drop(result); // Drop result to release the borrow
+
+            if is_pwd_error {
+                // Ensure we have a password
+                let mut pwd = password.lock().unwrap();
+                if pwd.is_none() {
+                    if args.quiet == 0 {
+                        if let Some(ref pb) = progress_bar {
+                            pb.println(format!("Encrypted file detected: {}", name));
+                        } else {
+                            eprintln!("Encrypted file detected: {}", name);
+                        }
+                    }
+                    *pwd = Some(prompt_for_password()?);
+                }
+                let pwd_bytes = pwd.clone();
+                drop(pwd);
+
+                // Try to decrypt with password
+                if let Some(ref pwd) = pwd_bytes {
+                    match archive.by_index_decrypt(i, pwd) {
+                        Ok(f) => file = f,
+                        Err(_e) => {
+                            if args.quiet < 2 {
+                                if let Some(ref pb) = progress_bar {
+                                    pb.println(format!("    error: {} - Invalid password", name));
+                                } else {
+                                    eprintln!("error: {} - Invalid password", name);
+                                }
+                            }
+                            if let Some(ref pb) = progress_bar {
+                                pb.inc(1);
+                            }
+                            skipped.fetch_add(1, Ordering::Relaxed);
+                            continue 'main_loop;
+                        },
+                    }
+                } else {
+                    if args.quiet < 2 {
+                        if let Some(ref pb) = progress_bar {
+                            pb.println(format!("    error: {} - Password required", name));
+                        } else {
+                            eprintln!("error: {} - Password required", name);
+                        }
+                    }
+                    if let Some(ref pb) = progress_bar {
+                        pb.inc(1);
+                    }
+                    skipped.fetch_add(1, Ordering::Relaxed);
+                    continue 'main_loop;
+                }
+            } else {
+                bail!("Failed to read file: {}", name);
+            }
+        }
 
         let outpath = if args.junk_paths {
             let filename = std::path::Path::new(&name)
@@ -446,7 +572,7 @@ pub fn extract_archive<R: Read + Seek>(archive: &mut ZipArchive<R>, args: &Args)
 
         extract_single_file(&mut file, &outpath, &mut buffer)?;
 
-        finalize_extracted_file(&outpath, mtime, unix_mode);
+        finalize_extracted_file(&outpath, mtime, unix_mode, args.no_timestamps);
 
         if args.quiet == 0
             && let Some(ref pb) = progress_bar
@@ -459,6 +585,17 @@ pub fn extract_archive<R: Read + Seek>(archive: &mut ZipArchive<R>, args: &Args)
 
         if let Some(ref pb) = progress_bar {
             pb.inc(1);
+        }
+    }
+
+    // Restore directory timestamps after all files extracted
+    // This must be done last because extracting files updates directory mtimes
+    if !args.no_timestamps {
+        for (dir_path, mtime) in directories.iter().rev() {
+            if let Some(dt) = mtime {
+                let filetime_mtime = datetime_to_filetime(*dt);
+                filetime::set_file_mtime(dir_path, filetime_mtime).ok();
+            }
         }
     }
 
@@ -521,6 +658,7 @@ mod tests {
             test: false,
             pipe: false,
             comment_only: false,
+            zipinfo: None,
             overwrite: true,
             never_overwrite: false,
             freshen: false,
@@ -528,8 +666,10 @@ mod tests {
             junk_paths: false,
             case_insensitive: false,
             lowercase: false,
+            no_timestamps: false,
             quiet: 2,
             threads: None,
+            password: None,
             patterns: vec![],
             exclude: vec![],
         }

@@ -42,8 +42,10 @@ pub mod extract;
 pub mod glob;
 pub mod linux;
 pub mod list;
+pub mod password;
 pub mod test_archive;
 pub mod utils;
+pub mod zipinfo;
 
 pub use args::Args;
 pub use extract::extract_archive;

@@ -14,6 +14,7 @@ A fast, reliable unzip utility written in Rust. Info-ZIP compatible with modern 
 
 - Extract archives with progress visualization
 - List contents (short and verbose formats)
+- Zipinfo mode for detailed archive inspection
 - Test archive integrity with CRC verification
 - Extract to stdout/pipe
 - Selective extraction with glob patterns
@@ -27,7 +28,7 @@ A fast, reliable unzip utility written in Rust. Info-ZIP compatible with modern 
 - LZMA, LZMA2
 - Bzip2
 - Zstd
-- AES encrypted archives
+- AES encrypted archives (with password via `-P` option)
 
 ## Installation
 
@@ -70,6 +71,7 @@ unzip [OPTIONS] <FILE> [PATTERN]...
 | `--test` | `-t` | Test archive integrity |
 | `--pipe` | `-p` | Extract to stdout (for piping) |
 | `--comment` | `-z` | Display archive comment only |
+| `--zipinfo [MODE]` | `-Z` | Zipinfo mode: detailed archive information (see modes below) |
 | `--overwrite` | `-o` | Overwrite existing files without prompting |
 | `--never-overwrite` | `-n` | Never overwrite existing files |
 | `--freshen` | `-f` | Only update existing files (don't create new) |
@@ -77,11 +79,24 @@ unzip [OPTIONS] <FILE> [PATTERN]...
 | `--junk-paths` | `-j` | Extract without directory structure |
 | `--case-insensitive` | `-C` | Match filenames case-insensitively |
 | `--lowercase` | `-L` | Convert filenames to lowercase |
+| `--no-timestamps` | `-D` | Skip restoring file and directory timestamps |
 | `--quiet` | `-q` | Quiet mode (-q less output, -qq minimal) |
 | `--threads <NUM>` | `-T` | Number of threads (default: auto) |
 | `--exclude <PATTERN>` | `-x` | Exclude files matching pattern |
+| `--password <PASSWORD>` | `-P` | Password for encrypted files (insecure, visible in process list) |
 | `--help` | `-h` | Print help |
 | `--version` | `-V` | Print version |
+
+### Zipinfo Modes
+
+| Mode | Description |
+|------|-------------|
+| `-Z` or `-Z s` | Short format (default): Unix ls -l style with compression method |
+| `-Z m` | Medium format: Short format + compression percentage |
+| `-Z l` | Long format: Short format + compressed size in bytes |
+| `-Z v` | Verbose format: Detailed multi-line information per file |
+| `-Z 1` | Filenames only: One filename per line (no headers) |
+| `-Z 2` | Filenames with headers: Filenames one per line with headers/trailers |
 
 ## Examples
 
@@ -102,6 +117,25 @@ unzip -v archive.zip
 
 # Test archive integrity
 unzip -t archive.zip
+```
+
+### Zipinfo Mode
+
+```bash
+# Default zipinfo output (short format)
+unzip -Z archive.zip
+
+# Medium format with compression percentage
+unzip -Z m archive.zip
+
+# Long format with compressed sizes
+unzip -Z l archive.zip
+
+# Verbose detailed information
+unzip -Z v archive.zip
+
+# Just filenames (for scripting)
+unzip -Z 1 archive.zip
 ```
 
 ### Selective Extraction
@@ -148,12 +182,20 @@ unzip -C archive.zip '*.TXT'
 # Convert filenames to lowercase
 unzip -L archive.zip
 
+# Skip timestamp restoration (use current time)
+unzip -D archive.zip
+
 # Quiet extraction
 unzip -q archive.zip
 
 # Very quiet (errors only)
 unzip -qq archive.zip
+
+# Extract password-protected archive (WARNING: insecure!)
+unzip -P mypassword encrypted.zip
 ```
+
+**Note on Passwords**: The `-P` option exposes your password in the process list and command history. This is insecure and should only be used in scripts with controlled access. For interactive use, consider using environment variables or secure password managers.
 
 ## Glob Pattern Syntax
 

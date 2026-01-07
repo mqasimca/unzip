@@ -32,6 +32,7 @@ use unzip::extract::{extract_archive, extract_to_pipe};
 use unzip::linux::{fadvise_sequential, madvise_sequential};
 use unzip::list::{display_comment, list_contents};
 use unzip::test_archive::test_archive;
+use unzip::zipinfo::display_zipinfo;
 
 fn main() -> Result<()> {
     let args = Args::parse();
@@ -69,7 +70,9 @@ fn main() -> Result<()> {
 }
 
 fn run_command<R: Read + Seek>(archive: &mut ZipArchive<R>, args: &Args) -> Result<()> {
-    if args.comment_only {
+    if args.zipinfo.is_some() {
+        display_zipinfo(archive, args)?;
+    } else if args.comment_only {
         display_comment(archive)?;
     } else if args.list_only || args.verbose {
         list_contents(archive, args.verbose)?;

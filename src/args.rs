@@ -36,7 +36,9 @@ use std::path::PathBuf;
   unzip -o archive.zip                 Overwrite files without prompting
   unzip -n archive.zip                 Never overwrite existing files
   unzip -f archive.zip                 Freshen (update only existing files)
-  unzip -u archive.zip                 Update (freshen + create new files)")]
+  unzip -u archive.zip                 Update (freshen + create new files)
+  unzip -Z archive.zip                 Zipinfo mode: detailed archive information
+  unzip -Z -v archive.zip              Verbose zipinfo output")]
 pub struct Args {
     /// Path to the ZIP file to extract
     #[arg(value_name = "FILE")]
@@ -66,6 +68,12 @@ pub struct Args {
     #[arg(short = 'z', long = "comment")]
     pub comment_only: bool,
 
+    /// Zipinfo mode: detailed archive information (-Z or -Z MODE)
+    /// Modes: -1 (filenames), -2 (filenames+headers), -s (short, default),
+    /// -m (medium with %), -l (long with size), -v (verbose), -h (header), -t (trailer)
+    #[arg(short = 'Z', long = "zipinfo", value_name = "MODE")]
+    pub zipinfo: Option<Option<String>>,
+
     /// Overwrite existing files without prompting
     #[arg(short = 'o', long = "overwrite")]
     pub overwrite: bool,
@@ -94,6 +102,10 @@ pub struct Args {
     #[arg(short = 'L', long = "lowercase")]
     pub lowercase: bool,
 
+    /// Skip restoring file timestamps
+    #[arg(short = 'D', long = "no-timestamps")]
+    pub no_timestamps: bool,
+
     /// Quiet mode (-q quieter, -qq quietest)
     #[arg(short = 'q', long = "quiet", action = clap::ArgAction::Count)]
     pub quiet: u8,
@@ -101,6 +113,10 @@ pub struct Args {
     /// Number of parallel extraction threads (default: auto)
     #[arg(short = 'T', long = "threads", value_name = "NUM")]
     pub threads: Option<usize>,
+
+    /// Password for encrypted files (insecure, use interactive prompt instead)
+    #[arg(short = 'P', long = "password", value_name = "PASSWORD")]
+    pub password: Option<String>,
 
     /// Files to extract (supports glob patterns)
     #[arg(value_name = "PATTERN")]
