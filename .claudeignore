@@ -75,3 +75,6 @@ Cargo.lock
 # Misc
 *.tmp
 *.temp
+
+# Planning documents
+*plan.md
