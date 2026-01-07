@@ -1,4 +1,30 @@
 //! Glob pattern matching for file selection
+//!
+//! Provides Info-ZIP compatible glob pattern matching for filtering files during
+//! extraction. Supports standard wildcard operators and recursive matching.
+//!
+//! # Supported Patterns
+//!
+//! - `*` - Matches zero or more characters, but not directory separator `/`
+//! - `**` - Matches zero or more characters, including directory separator `/`
+//! - `?` - Matches exactly one character, but not directory separator `/`
+//!
+//! # Algorithm
+//!
+//! Uses backtracking algorithm to handle complex wildcard patterns efficiently.
+//! The implementation is optimized for common cases (no wildcards, single wildcards)
+//! while correctly handling nested and adjacent wildcards.
+//!
+//! # Examples
+//!
+//! ```
+//! use unzip::glob_match;
+//!
+//! assert!(glob_match("*.txt", "file.txt"));
+//! assert!(glob_match("src/**/*.rs", "src/main.rs"));
+//! assert!(glob_match("test?.dat", "test1.dat"));
+//! assert!(!glob_match("*.txt", "file.rs"));
+//! ```
 
 /// Match a glob pattern against text
 ///
@@ -44,21 +70,21 @@ fn glob_match_impl(pattern: &[u8], text: &[u8]) -> bool {
                     next_tx = tx + 1;
                     px += 1;
                     continue;
-                }
+                },
                 b'?' => {
                     if tx < text.len() && text[tx] != b'/' {
                         px += 1;
                         tx += 1;
                         continue;
                     }
-                }
+                },
                 c => {
                     if tx < text.len() && text[tx] == c {
                         px += 1;
                         tx += 1;
                         continue;
                     }
-                }
+                },
             }
         }
 

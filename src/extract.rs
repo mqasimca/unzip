@@ -1,4 +1,33 @@
 //! Archive extraction functionality
+//!
+//! This module provides the core ZIP archive extraction logic with support for:
+//! - Multiple overwrite modes (always, never, freshen, update)
+//! - Pattern-based file inclusion/exclusion
+//! - Progress reporting with file counts and sizes
+//! - Preservation of file timestamps and Unix permissions
+//! - Extraction to stdout for piping
+//!
+//! # Performance
+//!
+//! Optimized for throughput using:
+//! - 256KB I/O buffers matching typical filesystem block sizes
+//! - Linux kernel hints (fallocate, fadvise) when available
+//! - Minimal memory allocations through buffer reuse
+//!
+//! # Examples
+//!
+//! ```no_run
+//! use std::fs::File;
+//! use zip::ZipArchive;
+//! use unzip::{Args, extract_archive};
+//! use clap::Parser;
+//!
+//! let file = File::open("archive.zip")?;
+//! let mut archive = ZipArchive::new(file)?;
+//! let args = Args::parse();
+//! extract_archive(&mut archive, &args)?;
+//! # Ok::<(), Box<dyn std::error::Error>>(())
+//! ```
 
 use anyhow::{Context, Result};
 use indicatif::{ProgressBar, ProgressStyle};
@@ -15,7 +44,181 @@ use crate::utils::{datetime_to_filetime, datetime_to_system_time, format_size, s
 /// Buffer size for file I/O (256KB for better throughput)
 const BUFFER_SIZE: usize = 256 * 1024;
 
-/// Extract files to stdout/pipe
+/// Decision on whether to overwrite an existing file
+#[derive(Debug, PartialEq, Eq)]
+enum OverwriteDecision {
+    /// Overwrite the existing file
+    Overwrite,
+    /// Skip extraction and show a message
+    Skip,
+    /// Skip extraction quietly (no message)
+    SkipQuietly,
+}
+
+/// Finalize an extracted file by setting modification time and permissions
+///
+/// # Arguments
+///
+/// * `outpath` - Path to the extracted file
+/// * `modified_time` - Optional modification time from archive
+/// * `unix_mode` - Optional Unix permissions mode
+///
+/// # Errors
+///
+/// This function logs errors but does not fail the extraction process
+fn finalize_extracted_file(
+    outpath: &std::path::Path,
+    modified_time: Option<zip::DateTime>,
+    unix_mode: Option<u32>,
+) {
+    if let Some(dt) = modified_time {
+        let mtime = datetime_to_filetime(dt);
+        filetime::set_file_mtime(outpath, mtime).ok();
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Some(mode) = unix_mode {
+            fs::set_permissions(outpath, fs::Permissions::from_mode(mode)).ok();
+        }
+    }
+
+    // Suppress unused variable warning on non-Unix platforms
+    #[cfg(not(unix))]
+    {
+        let _ = unix_mode;
+    }
+}
+
+/// Extract a single file from the archive to the filesystem
+///
+/// # Arguments
+///
+/// * `file` - The zip file entry to extract
+/// * `outpath` - Destination path for the extracted file
+/// * `buffer` - Reusable buffer for I/O operations
+///
+/// # Returns
+///
+/// Returns the number of bytes written
+///
+/// # Errors
+///
+/// Returns an error if file creation, writing, or finalization fails
+fn extract_single_file(
+    file: &mut zip::read::ZipFile,
+    outpath: &std::path::Path,
+    buffer: &mut [u8],
+) -> Result<u64> {
+    let size = file.size();
+
+    let outfile = File::create(outpath)
+        .with_context(|| format!("Failed to create file: {}", outpath.display()))?;
+
+    // Linux optimization: pre-allocate disk space to avoid fragmentation
+    if size > 0 {
+        preallocate_file(&outfile, size).ok();
+    }
+
+    // Use larger buffer for better throughput
+    let mut writer = BufWriter::with_capacity(BUFFER_SIZE, outfile);
+
+    // Manual copy with reused buffer for less allocation
+    let mut bytes_written = 0u64;
+    loop {
+        let bytes_read = file.read(buffer)?;
+        if bytes_read == 0 {
+            break;
+        }
+        writer.write_all(&buffer[..bytes_read])?;
+        bytes_written += bytes_read as u64;
+    }
+
+    let inner_file = writer.into_inner()?;
+
+    // Linux optimization: tell kernel we're done with this file's cache
+    fadvise_dontneed(&inner_file, 0, size);
+
+    Ok(bytes_written)
+}
+
+/// Determine whether to overwrite an existing file based on extraction args
+///
+/// # Arguments
+///
+/// * `outpath` - Path to the file that may exist
+/// * `args` - Command-line arguments with overwrite flags
+/// * `archive_modified` - Modification time from the archive file
+///
+/// # Returns
+///
+/// Returns `OverwriteDecision` indicating whether to overwrite, skip with message, or skip quietly
+fn should_overwrite_file(
+    outpath: &std::path::Path,
+    args: &Args,
+    archive_modified: Option<zip::DateTime>,
+) -> OverwriteDecision {
+    if !outpath.exists() {
+        if args.freshen {
+            return OverwriteDecision::SkipQuietly;
+        }
+        return OverwriteDecision::Overwrite;
+    }
+
+    if args.freshen || args.update {
+        if let Ok(meta) = outpath.metadata()
+            && let Ok(disk_mtime) = meta.modified()
+            && let Some(archive_mtime) = archive_modified
+        {
+            let archive_time = datetime_to_system_time(archive_mtime);
+            if archive_time <= disk_mtime {
+                return OverwriteDecision::SkipQuietly;
+            }
+        }
+        return OverwriteDecision::Overwrite;
+    }
+
+    if args.never_overwrite {
+        return OverwriteDecision::Skip;
+    } else if args.overwrite {
+        return OverwriteDecision::Overwrite;
+    }
+
+    OverwriteDecision::Skip
+}
+
+/// Extract files to stdout for piping to other commands.
+///
+///Writes file contents directly to stdout without creating files on disk.
+/// Directories are skipped. Multiple files are concatenated sequentially.
+///
+/// # Arguments
+///
+/// * `archive` - The ZIP archive to extract from
+/// * `args` - Command-line arguments controlling which files to extract
+///
+/// # Errors
+///
+/// Returns an error if:
+/// - A file cannot be read from the archive
+/// - Writing to stdout fails
+///
+/// # Examples
+///
+/// ```no_run
+/// use std::fs::File;
+/// use zip::ZipArchive;
+/// use unzip::Args;
+/// use unzip::extract::extract_to_pipe;
+/// use clap::Parser;
+///
+/// let file = File::open("archive.zip")?;
+/// let mut archive = ZipArchive::new(file)?;
+/// let args = Args::parse();
+/// extract_to_pipe(&mut archive, &args)?;
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
 pub fn extract_to_pipe<R: Read + Seek>(archive: &mut ZipArchive<R>, args: &Args) -> Result<()> {
     let stdout = io::stdout();
     let mut stdout_lock = stdout.lock();
@@ -28,7 +231,6 @@ pub fn extract_to_pipe<R: Read + Seek>(archive: &mut ZipArchive<R>, args: &Args)
             continue;
         }
 
-        // Check if file matches patterns
         if !should_extract(&name, &args.patterns, &args.exclude, args.case_insensitive) {
             continue;
         }
@@ -40,17 +242,59 @@ pub fn extract_to_pipe<R: Read + Seek>(archive: &mut ZipArchive<R>, args: &Args)
     Ok(())
 }
 
-/// Extract archive to filesystem with Linux optimizations
+/// Extract archive contents to the filesystem with Linux optimizations.
+///
+/// This is the main extraction function that handles all ZIP archive extraction with
+/// support for multiple overwrite modes, pattern filtering, progress reporting, and
+/// file metadata preservation.
+///
+/// # Arguments
+///
+/// * `archive` - The ZIP archive to extract from
+/// * `args` - Command-line arguments controlling extraction behavior including:
+///   - Output directory (`-d`)
+///   - Overwrite mode (`-o`, `-n`, `-f`, `-u`)
+///   - Pattern filters (include/exclude)
+///   - Directory flattening (`-j`)
+///   - Quiet mode (`-q`)
+///
+/// # Errors
+///
+/// Returns an error if:
+/// - The output directory cannot be created
+/// - A file cannot be extracted due to permissions or disk space
+/// - Directory traversal is detected in a file path
+/// - File timestamps cannot be set
+///
+/// # Performance
+///
+/// Uses several optimizations for throughput:
+/// - 256KB I/O buffers for efficient disk writes
+/// - Linux fallocate() to pre-allocate space and prevent fragmentation
+/// - Linux fadvise() to hint sequential access patterns
+/// - Buffer reuse to minimize allocations
+///
+/// # Examples
+///
+/// ```no_run
+/// use std::fs::File;
+/// use zip::ZipArchive;
+/// use unzip::{Args, extract_archive};
+/// use clap::Parser;
+///
+/// let file = File::open("archive.zip")?;
+/// let mut archive = ZipArchive::new(file)?;
+/// let args = Args::parse();
+/// extract_archive(&mut archive, &args)?;
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
 pub fn extract_archive<R: Read + Seek>(archive: &mut ZipArchive<R>, args: &Args) -> Result<()> {
-    let output_dir = args
-        .output_dir
-        .clone()
-        .unwrap_or_else(|| PathBuf::from("."));
+    let output_dir = args.output_dir.clone().unwrap_or_else(|| PathBuf::from("."));
 
-    // Create output directory if it doesn't exist
     if !output_dir.exists() {
-        fs::create_dir_all(&output_dir)
-            .with_context(|| format!("Failed to create output directory: {}", output_dir.display()))?;
+        fs::create_dir_all(&output_dir).with_context(|| {
+            format!("Failed to create output directory: {}", output_dir.display())
+        })?;
     }
 
     let total_files = archive.len();
@@ -62,7 +306,9 @@ pub fn extract_archive<R: Read + Seek>(archive: &mut ZipArchive<R>, args: &Args)
         let pb = ProgressBar::new(total_files as u64);
         pb.set_style(
             ProgressStyle::default_bar()
-                .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta})")?
+                .template(
+                    "{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta})",
+                )?
                 .progress_chars("#>-"),
         );
         Some(pb)
@@ -70,7 +316,6 @@ pub fn extract_archive<R: Read + Seek>(archive: &mut ZipArchive<R>, args: &Args)
         None
     };
 
-    // Collect file info
     let mut file_infos: Vec<(usize, String, bool, u64, Option<zip::DateTime>)> = Vec::new();
 
     for i in 0..total_files {
@@ -82,7 +327,7 @@ pub fn extract_archive<R: Read + Seek>(archive: &mut ZipArchive<R>, args: &Args)
         file_infos.push((i, name, is_dir, size, mtime));
     }
 
-    // First pass: create all directories (must be sequential)
+    // Must be sequential to avoid race conditions when creating nested directories
     for (_, name, is_dir, _, _) in &file_infos {
         if !*is_dir {
             continue;
@@ -103,10 +348,8 @@ pub fn extract_archive<R: Read + Seek>(archive: &mut ZipArchive<R>, args: &Args)
             .with_context(|| format!("Failed to create directory: {}", outpath.display()))?;
     }
 
-    // Pre-allocate buffer for extraction
     let mut buffer = vec![0u8; BUFFER_SIZE];
 
-    // Second pass: extract files
     for (i, name, is_dir, size, mtime) in file_infos {
         if is_dir {
             if let Some(ref pb) = progress_bar {
@@ -115,7 +358,6 @@ pub fn extract_archive<R: Read + Seek>(archive: &mut ZipArchive<R>, args: &Args)
             continue;
         }
 
-        // Check if file matches patterns
         if !should_extract(&name, &args.patterns, &args.exclude, args.case_insensitive) {
             if let Some(ref pb) = progress_bar {
                 pb.inc(1);
@@ -127,7 +369,6 @@ pub fn extract_archive<R: Read + Seek>(archive: &mut ZipArchive<R>, args: &Args)
         let mut file = archive.by_index(i)?;
 
         let outpath = if args.junk_paths {
-            // Extract filename only, no path
             let filename = std::path::Path::new(&name)
                 .file_name()
                 .map(|s| s.to_string_lossy().to_string())
@@ -151,121 +392,66 @@ pub fn extract_archive<R: Read + Seek>(archive: &mut ZipArchive<R>, args: &Args)
                         pb.inc(1);
                     }
                     continue;
-                }
+                },
             }
         };
 
-        // Create parent directories if needed
-        if let Some(parent) = outpath.parent() {
-            if !parent.exists() {
-                fs::create_dir_all(parent)
-                    .with_context(|| format!("Failed to create directory: {}", parent.display()))?;
-            }
-        }
-
-        // Handle freshen/update modes
-        if args.freshen || args.update {
-            if outpath.exists() {
-                // Check if archive file is newer
-                if let Ok(meta) = outpath.metadata() {
-                    if let Ok(disk_mtime) = meta.modified() {
-                        if let Some(archive_mtime) = mtime {
-                            let archive_time = datetime_to_system_time(archive_mtime);
-                            if archive_time <= disk_mtime {
-                                // Archive file is not newer, skip
-                                if let Some(ref pb) = progress_bar {
-                                    pb.inc(1);
-                                }
-                                skipped.fetch_add(1, Ordering::Relaxed);
-                                continue;
-                            }
-                        }
-                    }
-                }
-            } else if args.freshen {
-                // Freshen mode: don't create new files
-                if let Some(ref pb) = progress_bar {
-                    pb.inc(1);
-                }
-                skipped.fetch_add(1, Ordering::Relaxed);
-                continue;
-            }
-        }
-
-        // Handle overwrite logic
-        if outpath.exists() {
-            if args.never_overwrite {
-                if args.quiet == 0 {
-                    if let Some(ref pb) = progress_bar {
-                        pb.println(format!("    skipping: {} (already exists)", name));
-                    }
-                }
-                if let Some(ref pb) = progress_bar {
-                    pb.inc(1);
-                }
-                skipped.fetch_add(1, Ordering::Relaxed);
-                continue;
-            } else if !args.overwrite && !args.freshen && !args.update {
-                if args.quiet == 0 {
-                    if let Some(ref pb) = progress_bar {
-                        pb.println(format!("    skipping: {} (use -o to overwrite)", name));
-                    }
-                }
-                if let Some(ref pb) = progress_bar {
-                    pb.inc(1);
-                }
-                skipped.fetch_add(1, Ordering::Relaxed);
-                continue;
-            }
-        }
-
-        // Create output file
-        let outfile = File::create(&outpath)
-            .with_context(|| format!("Failed to create file: {}", outpath.display()))?;
-
-        // Linux optimization: pre-allocate disk space to avoid fragmentation
-        if size > 0 {
-            preallocate_file(&outfile, size).ok();
-        }
-
-        // Use larger buffer for better throughput
-        let mut writer = BufWriter::with_capacity(BUFFER_SIZE, outfile);
-
-        // Manual copy with reused buffer for less allocation
-        loop {
-            let bytes_read = file.read(&mut buffer)?;
-            if bytes_read == 0 {
-                break;
-            }
-            writer.write_all(&buffer[..bytes_read])?;
-        }
-
-        let inner_file = writer.into_inner()?;
-
-        // Linux optimization: tell kernel we're done with this file's cache
-        fadvise_dontneed(&inner_file, 0, size);
-
-        drop(inner_file);
-
-        // Set file modification time
-        if let Some(dt) = mtime {
-            let mtime = datetime_to_filetime(dt);
-            filetime::set_file_mtime(&outpath, mtime).ok();
-        }
-
-        // Set permissions on Unix systems
-        #[cfg(unix)]
+        if let Some(parent) = outpath.parent()
+            && !parent.exists()
         {
-            use std::os::unix::fs::PermissionsExt;
-            if let Some(mode) = file.unix_mode() {
-                fs::set_permissions(&outpath, fs::Permissions::from_mode(mode)).ok();
-            }
+            fs::create_dir_all(parent)
+                .with_context(|| format!("Failed to create directory: {}", parent.display()))?;
         }
 
-        if args.quiet == 0 {
-            if let Some(ref pb) = progress_bar {
-                pb.println(format!("  extracting: {}", name));
+        let decision = should_overwrite_file(&outpath, args, mtime);
+
+        match decision {
+            OverwriteDecision::Skip => {
+                if args.quiet == 0
+                    && let Some(ref pb) = progress_bar
+                {
+                    let msg = if args.never_overwrite {
+                        format!("    skipping: {} (already exists)", name)
+                    } else {
+                        format!("    skipping: {} (use -o to overwrite)", name)
+                    };
+                    pb.println(msg);
+                }
+                if let Some(ref pb) = progress_bar {
+                    pb.inc(1);
+                }
+                skipped.fetch_add(1, Ordering::Relaxed);
+                continue;
+            },
+            OverwriteDecision::SkipQuietly => {
+                if let Some(ref pb) = progress_bar {
+                    pb.inc(1);
+                }
+                skipped.fetch_add(1, Ordering::Relaxed);
+                continue;
+            },
+            OverwriteDecision::Overwrite => {},
+        }
+
+        let unix_mode = {
+            #[cfg(unix)]
+            {
+                file.unix_mode()
             }
+            #[cfg(not(unix))]
+            {
+                None
+            }
+        };
+
+        extract_single_file(&mut file, &outpath, &mut buffer)?;
+
+        finalize_extracted_file(&outpath, mtime, unix_mode);
+
+        if args.quiet == 0
+            && let Some(ref pb) = progress_bar
+        {
+            pb.println(format!("  extracting: {}", name));
         }
 
         extracted.fetch_add(1, Ordering::Relaxed);
@@ -303,8 +489,8 @@ pub fn extract_archive<R: Read + Seek>(archive: &mut ZipArchive<R>, args: &Args)
 mod tests {
     use super::*;
     use std::io::Cursor;
-    use zip::write::SimpleFileOptions;
     use zip::ZipWriter;
+    use zip::write::SimpleFileOptions;
 
     fn create_test_zip(files: &[(&str, &[u8])]) -> Vec<u8> {
         let mut buf = Vec::new();
@@ -478,10 +664,7 @@ mod tests {
 
         extract_archive(&mut archive, &args).unwrap();
 
-        assert_eq!(
-            fs::read_to_string(&existing_file).unwrap(),
-            "Original content"
-        );
+        assert_eq!(fs::read_to_string(&existing_file).unwrap(), "Original content");
     }
 
     #[test]
@@ -537,6 +720,67 @@ mod tests {
 
         let extracted = fs::read(temp_dir.path().join("binary.bin")).unwrap();
         assert_eq!(extracted, binary_data);
+    }
+
+    #[test]
+    fn test_should_overwrite_file_nonexistent() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("nonexistent.txt");
+        let args = default_args();
+
+        let decision = should_overwrite_file(&path, &args, None);
+        assert_eq!(decision, OverwriteDecision::Overwrite);
+    }
+
+    #[test]
+    fn test_should_overwrite_file_freshen_nonexistent() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("nonexistent.txt");
+        let mut args = default_args();
+        args.freshen = true;
+
+        let decision = should_overwrite_file(&path, &args, None);
+        assert_eq!(decision, OverwriteDecision::SkipQuietly);
+    }
+
+    #[test]
+    fn test_should_overwrite_file_never_overwrite() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("existing.txt");
+        fs::write(&path, "content").unwrap();
+
+        let mut args = default_args();
+        args.never_overwrite = true;
+        args.overwrite = false;
+
+        let decision = should_overwrite_file(&path, &args, None);
+        assert_eq!(decision, OverwriteDecision::Skip);
+    }
+
+    #[test]
+    fn test_should_overwrite_file_explicit_overwrite() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("existing.txt");
+        fs::write(&path, "content").unwrap();
+
+        let mut args = default_args();
+        args.overwrite = true;
+
+        let decision = should_overwrite_file(&path, &args, None);
+        assert_eq!(decision, OverwriteDecision::Overwrite);
+    }
+
+    #[test]
+    fn test_should_overwrite_file_default_existing() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("existing.txt");
+        fs::write(&path, "content").unwrap();
+
+        let mut args = default_args();
+        args.overwrite = false;
+
+        let decision = should_overwrite_file(&path, &args, None);
+        assert_eq!(decision, OverwriteDecision::Skip);
     }
 
     #[test]

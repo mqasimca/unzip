@@ -1,0 +1,77 @@
+# Rust Build Artifacts
+target/
+*.o
+*.a
+*.so
+*.dylib
+*.dll
+*.exe
+
+# Rust-specific
+.rustup/
+.cargo/
+*.rlib
+*.rmeta
+
+# Documentation
+/doc/
+/target/doc/
+
+# Benchmark results
+*.csv
+/target/criterion/
+
+# Temporary test files
+test_output/
+test_*.zip
+test_data/
+
+# IDE and Editor Files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS Files
+.DS_Store
+Thumbs.db
+*.bak
+
+# Environment and Secrets
+.env
+.env.local
+.env.*.local
+secrets/
+credentials.json
+*.key
+*.pem
+
+# Git
+.git/
+.gitignore
+
+# CI/CD
+.github/
+
+# Logs
+*.log
+logs/
+
+# Coverage Reports
+coverage/
+tarpaulin-report.html
+*.profraw
+*.profdata
+
+# Flamegraphs
+flamegraph.svg
+perf.data
+perf.data.old
+
+# Package Managers
+Cargo.lock
+
+# Misc
+*.tmp
+*.temp

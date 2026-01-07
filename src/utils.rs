@@ -1,10 +1,57 @@
 //! Utility functions for formatting and filtering
+//!
+//! Provides shared helper functions used across the unzip codebase:
+//! - Pattern-based file filtering (inclusion and exclusion)
+//! - Human-readable size formatting
+//! - Timestamp conversion between ZIP and filesystem formats
+//!
+//! # Pattern Matching
+//!
+//! File filtering supports both inclusion and exclusion patterns with glob syntax.
+//! Multiple patterns can be specified and are evaluated in order.
+//!
+//! # Examples
+//!
+//! ```
+//! use unzip::{format_size, should_extract};
+//!
+//! // Size formatting
+//! assert_eq!(format_size(1024), "1.0K");
+//! assert_eq!(format_size(1536 * 1024), "1.5M");
+//!
+//! // Pattern matching
+//! let includes = vec!["*.txt".to_string()];
+//! let excludes = vec![];
+//! assert!(should_extract("file.txt", &includes, &excludes, false));
+//! ```
 
 use crate::glob::glob_match;
 use filetime::FileTime;
 use std::time::SystemTime;
 
-/// Format a byte size as human-readable string
+/// Format a byte size as a human-readable string with appropriate units.
+///
+/// Converts raw byte counts to KB, MB, or GB units with one decimal place
+/// of precision for better readability in file listings.
+///
+/// # Arguments
+///
+/// * `size` - The size in bytes to format
+///
+/// # Returns
+///
+/// A formatted string like "1.5M" or "512.0K" or "42B"
+///
+/// # Examples
+///
+/// ```
+/// use unzip::format_size;
+///
+/// assert_eq!(format_size(512), "512B");
+/// assert_eq!(format_size(1024), "1.0K");
+/// assert_eq!(format_size(1536 * 1024), "1.5M");
+/// assert_eq!(format_size(2 * 1024 * 1024 * 1024), "2.0G");
+/// ```
 pub fn format_size(size: u64) -> String {
     const KB: u64 = 1024;
     const MB: u64 = KB * 1024;
@@ -21,7 +68,42 @@ pub fn format_size(size: u64) -> String {
     }
 }
 
-/// Check if a file should be extracted based on patterns and exclusions
+/// Determine if a file should be extracted based on inclusion/exclusion patterns.
+///
+/// Evaluates a filename against include and exclude glob patterns to determine
+/// if it should be processed. Exclusion patterns are checked first and take
+/// precedence over inclusion patterns.
+///
+/// # Arguments
+///
+/// * `name` - The filename to check
+/// * `patterns` - Include patterns (empty means include all)
+/// * `exclude` - Exclude patterns (always applied)
+/// * `case_insensitive` - If true, perform case-insensitive matching
+///
+/// # Returns
+///
+/// `true` if the file should be extracted, `false` if it should be skipped
+///
+/// # Logic
+///
+/// 1. If filename matches any exclusion pattern → return `false`
+/// 2. If no inclusion patterns specified → return `true`
+/// 3. If filename matches any inclusion pattern → return `true`
+/// 4. Otherwise → return `false`
+///
+/// # Examples
+///
+/// ```
+/// use unzip::should_extract;
+///
+/// let includes = vec!["*.txt".to_string()];
+/// let excludes = vec!["secret*".to_string()];
+///
+/// assert!(should_extract("file.txt", &includes, &excludes, false));
+/// assert!(!should_extract("secret.txt", &includes, &excludes, false));
+/// assert!(!should_extract("file.rs", &includes, &excludes, false));
+/// ```
 pub fn should_extract(
     name: &str,
     patterns: &[String],
@@ -34,7 +116,6 @@ pub fn should_extract(
         name.to_string()
     };
 
-    // Check exclusions first
     for pattern in exclude {
         let pattern_cmp = if case_insensitive {
             pattern.to_lowercase()
@@ -46,12 +127,10 @@ pub fn should_extract(
         }
     }
 
-    // If no patterns specified, extract all
     if patterns.is_empty() {
         return true;
     }
 
-    // Check if matches any pattern
     for pattern in patterns {
         let pattern_cmp = if case_insensitive {
             pattern.to_lowercase()
@@ -66,7 +145,29 @@ pub fn should_extract(
     false
 }
 
-/// Convert ZIP DateTime to SystemTime
+/// Convert ZIP DateTime format to Rust SystemTime.
+///
+/// Converts the date/time format used in ZIP archives (year, month, day, hour,
+/// minute, second) to Rust's standard SystemTime for setting file modification times.
+///
+/// # Arguments
+///
+/// * `dt` - The ZIP DateTime to convert
+///
+/// # Returns
+///
+/// A SystemTime representing the same instant
+///
+/// # Examples
+///
+/// ```
+/// use zip::DateTime;
+/// use unzip::utils::datetime_to_system_time;
+///
+/// let dt = DateTime::from_date_and_time(2024, 1, 15, 10, 30, 0).unwrap();
+/// let sys_time = datetime_to_system_time(dt);
+/// // sys_time now represents 2024-01-15 10:30:00
+/// ```
 pub fn datetime_to_system_time(dt: zip::DateTime) -> SystemTime {
     use std::time::Duration;
 
@@ -79,10 +180,34 @@ pub fn datetime_to_system_time(dt: zip::DateTime) -> SystemTime {
     SystemTime::UNIX_EPOCH + Duration::from_secs(secs)
 }
 
-/// Convert ZIP DateTime to FileTime
+/// Convert ZIP DateTime format to filetime::FileTime.
+///
+/// Converts ZIP archive timestamps to the FileTime type used for setting
+/// file modification times on disk via the filetime crate.
+///
+/// # Arguments
+///
+/// * `dt` - The ZIP DateTime to convert
+///
+/// # Returns
+///
+/// A FileTime representing the same instant, suitable for use with
+/// `filetime::set_file_mtime()`
+///
+/// # Examples
+///
+/// ```no_run
+/// use zip::DateTime;
+/// use unzip::utils::datetime_to_filetime;
+/// use std::path::Path;
+///
+/// let dt = DateTime::from_date_and_time(2024, 1, 15, 10, 30, 0).unwrap();
+/// let ft = datetime_to_filetime(dt);
+/// // Can now use: filetime::set_file_mtime(path, ft)?;
+/// ```
 pub fn datetime_to_filetime(dt: zip::DateTime) -> FileTime {
     let days_since_epoch = days_from_date(dt.year() as i32, dt.month() as i32, dt.day() as i32);
-    let secs = (days_since_epoch as i64) * 86400
+    let secs = days_since_epoch * 86400
         + (dt.hour() as i64) * 3600
         + (dt.minute() as i64) * 60
         + (dt.second() as i64);
@@ -95,12 +220,37 @@ fn days_from_date(year: i32, month: i32, day: i32) -> i64 {
     let y = if month <= 2 { year - 1 } else { year };
     let era = if y >= 0 { y } else { y - 399 } / 400;
     let yoe = (y - era * 400) as u32;
-    let doy = (153 * (if month > 2 { month - 3 } else { month + 9 }) as u32 + 2) / 5 + day as u32 - 1;
+    let doy =
+        (153 * (if month > 2 { month - 3 } else { month + 9 }) as u32 + 2) / 5 + day as u32 - 1;
     let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
     (era as i64) * 146097 + (doe as i64) - 719468
 }
 
-/// Format ZIP DateTime as string
+/// Format a ZIP DateTime as a human-readable string.
+///
+/// Converts an optional ZIP DateTime to a formatted string suitable for
+/// display in file listings. Returns "N/A" if no datetime is available.
+///
+/// # Arguments
+///
+/// * `datetime` - Optional ZIP DateTime to format
+///
+/// # Returns
+///
+/// A formatted string like "2024-01-15 10:30:00", or fixed-width spaces if None
+/// (for alignment in file listings)
+///
+/// # Examples
+///
+/// ```
+/// use zip::DateTime;
+/// use unzip::utils::format_datetime;
+///
+/// let dt = DateTime::from_date_and_time(2024, 1, 15, 10, 30, 0).unwrap();
+/// assert_eq!(format_datetime(Some(dt)), "2024-01-15 10:30:00");
+/// // None returns fixed-width space padding for alignment in listings
+/// assert_eq!(format_datetime(None), "                   ");
+/// ```
 pub fn format_datetime(datetime: Option<zip::DateTime>) -> String {
     match datetime {
         Some(dt) => format!(

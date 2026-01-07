@@ -1,0 +1,72 @@
+{
+  "model": "claude-sonnet-4-5-20250929",
+  "permissions": {
+    "allow": [
+      "Bash(cargo:*)",
+      "Bash(rustfmt:*)",
+      "Bash(rustc:*)",
+      "Bash(git:*)",
+      "Bash(make:*)",
+      "Read(./src/**)",
+      "Read(./tests/**)",
+      "Read(./benches/**)",
+      "Read(./Cargo.toml)",
+      "Read(./Cargo.lock)",
+      "Read(./README.md)",
+      "Read(./CLAUDE.md)",
+      "Read(./plan.md)",
+      "Read(./.claude/**)",
+      "Read(./rustfmt.toml)",
+      "Read(./clippy.toml)",
+      "Read(./Makefile)",
+      "Edit(./src/**)",
+      "Edit(./tests/**)",
+      "Edit(./benches/**)",
+      "Edit(./Cargo.toml)",
+      "Edit(./README.md)",
+      "Edit(./CLAUDE.md)",
+      "Edit(./rustfmt.toml)",
+      "Edit(./clippy.toml)",
+      "Edit(./Makefile)",
+      "Write(./tests/**)",
+      "Write(./benches/**)"
+    ],
+    "deny": [
+      "Read(./.env)",
+      "Read(./.env.*)",
+      "Read(./secrets/**)",
+      "Write(./Cargo.lock)",
+      "Edit(./Cargo.lock)"
+    ],
+    "defaultMode": "default"
+  },
+  "env": {
+    "RUST_BACKTRACE": "1",
+    "RUST_LOG": "debug",
+    "CARGO_TERM_COLOR": "always"
+  },
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.claude/hooks/rust_format_check.sh"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.claude/hooks/rust_lint_check.sh"
+          }
+        ]
+      }
+    ]
+  }
+}

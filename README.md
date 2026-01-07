@@ -237,6 +237,12 @@ unzip archive.zip '*.txt' -x '*.log'
 - [crc32fast](https://crates.io/crates/crc32fast) - Fast CRC verification
 - [rustix](https://crates.io/crates/rustix) - Linux syscalls for kernel optimizations (Linux only)
 
+## Contributing
+
+Contributions are welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
+
+For development information including architecture, project structure, and coding standards, see [CLAUDE.md](CLAUDE.md).
+
 ## License
 
 MIT

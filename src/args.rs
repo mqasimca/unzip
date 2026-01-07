@@ -1,10 +1,28 @@
 //! Command-line argument parsing
+//!
+//! Defines the CLI interface for the unzip utility using clap. Provides Info-ZIP
+//! compatible options for extraction, listing, testing, and filtering operations.
+//!
+//! # Compatibility
+//!
+//! Aims for command-line compatibility with Info-ZIP unzip, supporting common
+//! options like `-l`, `-v`, `-t`, `-d`, `-o`, `-n`, `-f`, `-u`, `-j`, and `-x`.
+//!
+//! # Examples
+//!
+//! ```no_run
+//! use unzip::Args;
+//! use clap::Parser;
+//!
+//! // Parse from command line
+//! let args = Args::parse();
+//! ```
 
 use clap::Parser;
 use std::path::PathBuf;
 
 /// A fast, reliable unzip utility written in Rust - Info-ZIP compatible
-#[derive(Parser, Debug, Clone)]
+#[derive(Parser, Debug, Clone, Default)]
 #[command(author, version, about, long_about = None)]
 #[command(after_help = "Examples:
   unzip archive.zip                    Extract all files to current directory

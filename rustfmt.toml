@@ -1,0 +1,63 @@
+# Rust formatting configuration for unzip project
+# https://rust-lang.github.io/rustfmt/
+
+# Edition
+edition = "2024"
+
+# Line width
+max_width = 100
+comment_width = 100
+wrap_comments = true
+
+# Indentation
+hard_tabs = false
+tab_spaces = 4
+
+# Line endings
+newline_style = "Unix"
+
+# Imports
+reorder_imports = true
+reorder_modules = true
+imports_granularity = "Crate"
+
+# Formatting
+use_small_heuristics = "Default"
+fn_call_width = 80
+struct_lit_width = 80
+struct_variant_width = 80
+array_width = 80
+chain_width = 80
+
+# Remove parens
+remove_nested_parens = true
+
+# Trailing commas
+trailing_comma = "Vertical"
+trailing_semicolon = true
+
+# Misc
+match_block_trailing_comma = true
+normalize_comments = true
+normalize_doc_attributes = true
+format_strings = true
+format_macro_matchers = true
+format_macro_bodies = true
+
+# Control flow
+control_brace_style = "AlwaysSameLine"
+brace_style = "SameLineWhere"
+
+# Space around operators
+space_before_colon = false
+space_after_colon = true
+
+# Use field init shorthand
+use_field_init_shorthand = true
+
+# Force explicit types
+force_explicit_abi = true
+
+# Blank lines
+blank_lines_upper_bound = 2
+blank_lines_lower_bound = 0

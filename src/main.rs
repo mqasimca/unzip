@@ -1,6 +1,26 @@
 //! A fast, reliable unzip utility written in Rust - Info-ZIP compatible
+//!
+//! # Overview
+//!
+//! This is a high-performance unzip implementation that aims for ~5x speed improvement
+//! over Info-ZIP unzip while maintaining CLI compatibility. Performance gains come from:
+//!
+//! - Memory-mapped I/O for files >1MB
+//! - Linux kernel optimizations (madvise, fallocate, fadvise)
+//! - Efficient buffering (256KB buffers)
+//! - Minimal allocations
+//!
+//! # Architecture
+//!
+//! The main entry point handles:
+//! 1. CLI argument parsing and validation
+//! 2. File opening and memory mapping decisions
+//! 3. Dispatching to appropriate operation (list, test, extract, pipe)
+//!
+//! Files >1MB use memory mapping for better performance, while smaller files
+//! use traditional file I/O to avoid mmap overhead.
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::Parser;
 use memmap2::Mmap;
 use std::fs::File;
@@ -16,24 +36,20 @@ use unzip::test_archive::test_archive;
 fn main() -> Result<()> {
     let args = Args::parse();
 
-    // Validate conflicting options
     if args.overwrite && args.never_overwrite {
         bail!("Cannot specify both -o (overwrite) and -n (never overwrite)");
     }
 
-    // Open and memory-map the file for better performance
     let file = File::open(&args.zipfile)
         .with_context(|| format!("Failed to open ZIP file: {}", args.zipfile.display()))?;
 
     let file_size = file.metadata()?.len();
 
-    // Use memory mapping for files > 1MB for better performance
     if file_size > 1024 * 1024 {
         // Linux optimization: hint kernel about sequential access
         fadvise_sequential(&file, file_size);
 
-        let mmap =
-            unsafe { Mmap::map(&file) }.with_context(|| "Failed to memory-map file")?;
+        let mmap = unsafe { Mmap::map(&file) }.with_context(|| "Failed to memory-map file")?;
 
         // Linux optimization: tell kernel we'll read sequentially
         madvise_sequential(mmap.as_ptr(), mmap.len());

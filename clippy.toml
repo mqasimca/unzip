@@ -1,0 +1,41 @@
+# Clippy configuration for unzip project
+# https://doc.rust-lang.org/clippy/
+
+# Cognitive complexity threshold for functions
+# Default: 25
+cognitive-complexity-threshold = 25
+
+# Type complexity threshold
+# Default: 250
+type-complexity-threshold = 250
+
+# Too many arguments threshold
+# Default: 7
+too-many-arguments-threshold = 7
+
+# Too many lines threshold
+# Default: 100
+too-many-lines-threshold = 100
+
+# Single char binding names threshold
+# Default: 4
+single-char-binding-names-threshold = 4
+
+# Disallowed methods
+disallowed-methods = [
+    { path = "std::panic::panic_any", reason = "Use anyhow::Result instead of panicking" },
+    { path = "std::process::exit", reason = "Use proper error handling instead of exit()" }
+]
+
+# Disallowed types
+disallowed-types = []
+
+# Allow these lints (exceptions to defaults)
+allow-expect-in-tests = true
+allow-unwrap-in-tests = true
+
+# Warn on these lints
+# (These are in addition to the default warnings)
+
+# Enforce these lints as errors
+# (Use with: cargo clippy -- -D <lint-name>)

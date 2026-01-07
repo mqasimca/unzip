@@ -12,7 +12,7 @@ use std::num::NonZeroU64;
 /// Apply madvise hints to memory-mapped region for sequential reading
 #[cfg(target_os = "linux")]
 pub fn madvise_sequential(addr: *const u8, len: usize) {
-    use rustix::mm::{madvise, Advice};
+    use rustix::mm::{Advice, madvise};
 
     // SAFETY: addr and len come from a valid mmap region
     unsafe {
@@ -32,7 +32,7 @@ pub fn madvise_sequential(_addr: *const u8, _len: usize) {
 /// Pre-allocate disk space for a file to avoid fragmentation
 #[cfg(target_os = "linux")]
 pub fn preallocate_file(file: &File, size: u64) -> std::io::Result<()> {
-    use rustix::fs::{fallocate, FallocateFlags};
+    use rustix::fs::{FallocateFlags, fallocate};
 
     if size > 0 {
         // Pre-allocate space without zeroing (faster)
@@ -49,7 +49,7 @@ pub fn preallocate_file(_file: &File, _size: u64) -> std::io::Result<()> {
 /// Advise kernel about file access pattern
 #[cfg(target_os = "linux")]
 pub fn fadvise_sequential(file: &File, len: u64) {
-    use rustix::fs::{fadvise, Advice};
+    use rustix::fs::{Advice, fadvise};
 
     // Tell kernel we'll read sequentially
     let _ = fadvise(file, 0, NonZeroU64::new(len), Advice::Sequential);
@@ -65,7 +65,7 @@ pub fn fadvise_sequential(_file: &File, _len: u64) {
 /// Advise kernel we're done with file data (can be evicted from cache)
 #[cfg(target_os = "linux")]
 pub fn fadvise_dontneed(file: &File, offset: u64, len: u64) {
-    use rustix::fs::{fadvise, Advice};
+    use rustix::fs::{Advice, fadvise};
 
     let _ = fadvise(file, offset, NonZeroU64::new(len), Advice::DontNeed);
 }
