@@ -31,7 +31,6 @@ use anyhow::Result;
 use std::io::{Read, Seek, Write};
 use zip::ZipArchive;
 
-
 struct DateTimeCache {
     last: Option<zip::DateTime>,
     buf: [u8; 19],
@@ -39,24 +38,15 @@ struct DateTimeCache {
 
 impl DateTimeCache {
     fn new() -> Self {
-        Self {
-            last: None,
-            buf: [b' '; 19],
-        }
+        Self { last: None, buf: [b' '; 19] }
     }
 
     fn as_str(&mut self, datetime: Option<zip::DateTime>) -> &str {
         match datetime {
             Some(dt) => {
                 if self.last != Some(dt) {
-                    let (y, m, d, h, min, s) = (
-                        dt.year(),
-                        dt.month(),
-                        dt.day(),
-                        dt.hour(),
-                        dt.minute(),
-                        dt.second(),
-                    );
+                    let (y, m, d, h, min, s) =
+                        (dt.year(), dt.month(), dt.day(), dt.hour(), dt.minute(), dt.second());
                     self.buf[0] = b'0' + (y / 1000 % 10) as u8;
                     self.buf[1] = b'0' + (y / 100 % 10) as u8;
                     self.buf[2] = b'0' + (y / 10 % 10) as u8;
@@ -114,17 +104,6 @@ fn write_hex_u32(buf: &mut [u8; 8], value: u32) {
         };
         v >>= 4;
     }
-}
-
-fn write_right_aligned(out: &mut dyn Write, s: &str, width: usize) -> Result<()> {
-    let len = s.len();
-    if len < width {
-        for _ in 0..(width - len) {
-            out.write_all(b" ")?;
-        }
-    }
-    out.write_all(s.as_bytes())?;
-    Ok(())
 }
 
 fn size_to_str<'a>(buf: &'a mut [u8; 32], size: u64) -> &'a str {
@@ -264,6 +243,9 @@ pub fn list_contents<R: Read + Seek>(archive: &mut ZipArchive<R>, verbose: bool)
     let mut total_compressed: u64 = 0;
     let mut file_count = 0;
 
+    // Pre-allocate line buffer to avoid allocations per file
+    let mut line_buf = Vec::with_capacity(512);
+
     for i in 0..archive.len() {
         let file = archive.by_index_raw(i)?;
         let size = file.size();
@@ -275,47 +257,68 @@ pub fn list_contents<R: Read + Seek>(archive: &mut ZipArchive<R>, verbose: bool)
         let datetime_str = datetime_cache.as_str(file.last_modified());
         let name = file.name();
 
+        line_buf.clear();
+
         if verbose {
             let ratio = if size > 0 {
                 100 - (compressed * 100 / size)
             } else {
                 0
             };
+
+            // Build complete line in buffer with single write
+            // Right-align size (8 chars)
             let size_len = write_u64(&mut num_buf, size);
-            write_right_aligned(&mut out, unsafe {
-                std::str::from_utf8_unchecked(&num_buf[..size_len])
-            }, 8)?;
-            out.write_all(b"  ")?;
+            for _ in 0..(8_usize.saturating_sub(size_len)) {
+                line_buf.push(b' ');
+            }
+            line_buf.extend_from_slice(&num_buf[..size_len]);
+            line_buf.extend_from_slice(b"  ");
 
+            // Right-align compressed size (8 chars)
             let comp_len = write_u64(&mut num_buf, compressed);
-            write_right_aligned(&mut out, unsafe {
-                std::str::from_utf8_unchecked(&num_buf[..comp_len])
-            }, 8)?;
-            out.write_all(b"  ")?;
+            for _ in 0..(8_usize.saturating_sub(comp_len)) {
+                line_buf.push(b' ');
+            }
+            line_buf.extend_from_slice(&num_buf[..comp_len]);
+            line_buf.extend_from_slice(b"  ");
 
+            // Right-align ratio (4 chars)
             let ratio_len = write_u64(&mut num_buf, ratio as u64);
-            write_right_aligned(&mut out, unsafe {
-                std::str::from_utf8_unchecked(&num_buf[..ratio_len])
-            }, 4)?;
-            out.write_all(b"%  ")?;
+            for _ in 0..(4_usize.saturating_sub(ratio_len)) {
+                line_buf.push(b' ');
+            }
+            line_buf.extend_from_slice(&num_buf[..ratio_len]);
+            line_buf.extend_from_slice(b"%  ");
 
-            out.write_all(datetime_str.as_bytes())?;
-            out.write_all(b"  ")?;
+            line_buf.extend_from_slice(datetime_str.as_bytes());
+            line_buf.extend_from_slice(b"  ");
 
             write_hex_u32(&mut crc_buf, file.crc32());
-            out.write_all(&crc_buf)?;
-            out.write_all(b"  ")?;
+            line_buf.extend_from_slice(&crc_buf);
+            line_buf.extend_from_slice(b"  ");
 
-            out.write_all(name.as_bytes())?;
-            out.write_all(b"\n")?;
+            line_buf.extend_from_slice(name.as_bytes());
+            line_buf.push(b'\n');
+
+            // Single write for entire line
+            out.write_all(&line_buf)?;
         } else {
             let size_str = size_to_str(&mut size_buf, size);
-            write_right_aligned(&mut out, size_str, 10)?;
-            out.write_all(b"  ")?;
-            out.write_all(datetime_str.as_bytes())?;
-            out.write_all(b"  ")?;
-            out.write_all(name.as_bytes())?;
-            out.write_all(b"\n")?;
+
+            // Right-align size (10 chars)
+            for _ in 0..(10_usize.saturating_sub(size_str.len())) {
+                line_buf.push(b' ');
+            }
+            line_buf.extend_from_slice(size_str.as_bytes());
+            line_buf.extend_from_slice(b"  ");
+            line_buf.extend_from_slice(datetime_str.as_bytes());
+            line_buf.extend_from_slice(b"  ");
+            line_buf.extend_from_slice(name.as_bytes());
+            line_buf.push(b'\n');
+
+            // Single write for entire line
+            out.write_all(&line_buf)?;
         }
     }
 
@@ -334,13 +337,22 @@ pub fn list_contents<R: Read + Seek>(archive: &mut ZipArchive<R>, verbose: bool)
     } else {
         writeln!(&mut out, "{:->10}  {:->19}  {:->40}", "", "", "")?;
         let total_str = size_to_str(&mut size_buf, total_size);
-        write_right_aligned(&mut out, total_str, 10)?;
-        out.write_all(b"  ")?;
-        out.write_all(b"                   ")?;
-        out.write_all(b"  ")?;
+
+        // Build footer line in buffer with single write
+        line_buf.clear();
+        for _ in 0..(10_usize.saturating_sub(total_str.len())) {
+            line_buf.push(b' ');
+        }
+        line_buf.extend_from_slice(total_str.as_bytes());
+        line_buf.extend_from_slice(b"  ");
+        line_buf.extend_from_slice(b"                   ");
+        line_buf.extend_from_slice(b"  ");
+
         let count_len = write_u64(&mut num_buf, file_count as u64);
-        out.write_all(unsafe { std::str::from_utf8_unchecked(&num_buf[..count_len]) }.as_bytes())?;
-        out.write_all(b" files\n")?;
+        line_buf.extend_from_slice(&num_buf[..count_len]);
+        line_buf.extend_from_slice(b" files\n");
+
+        out.write_all(&line_buf)?;
     }
 
     Ok(())

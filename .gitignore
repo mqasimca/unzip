@@ -11,3 +11,7 @@ Cargo.lock
 
 # Planning documents
 *plan.md
+
+# Benchmark and test artifacts
+benchmark.sh
+bench_test/
