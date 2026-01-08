@@ -110,39 +110,89 @@ pub fn should_extract(
     exclude: &[String],
     case_insensitive: bool,
 ) -> bool {
-    let name_cmp = if case_insensitive {
-        name.to_lowercase()
-    } else {
-        name.to_string()
-    };
+    let matcher = PatternMatcher::new(patterns, exclude, case_insensitive);
+    matcher.should_extract(name)
+}
 
-    for pattern in exclude {
-        let pattern_cmp = if case_insensitive {
-            pattern.to_lowercase()
+pub(crate) struct PatternMatcher<'a> {
+    patterns: &'a [String],
+    exclude: &'a [String],
+    patterns_ci: Option<Vec<String>>,
+    exclude_ci: Option<Vec<String>>,
+    case_insensitive: bool,
+}
+
+impl<'a> PatternMatcher<'a> {
+    pub(crate) fn new(
+        patterns: &'a [String],
+        exclude: &'a [String],
+        case_insensitive: bool,
+    ) -> Self {
+        let patterns_ci = if case_insensitive {
+            Some(patterns.iter().map(|p| p.to_lowercase()).collect())
         } else {
-            pattern.clone()
+            None
         };
-        if glob_match(&pattern_cmp, &name_cmp) {
-            return false;
+        let exclude_ci = if case_insensitive {
+            Some(exclude.iter().map(|p| p.to_lowercase()).collect())
+        } else {
+            None
+        };
+        Self {
+            patterns,
+            exclude,
+            patterns_ci,
+            exclude_ci,
+            case_insensitive,
         }
     }
 
-    if patterns.is_empty() {
-        return true;
-    }
-
-    for pattern in patterns {
-        let pattern_cmp = if case_insensitive {
-            pattern.to_lowercase()
-        } else {
-            pattern.clone()
-        };
-        if glob_match(&pattern_cmp, &name_cmp) {
+    pub(crate) fn should_extract(&self, name: &str) -> bool {
+        if self.patterns.is_empty() && self.exclude.is_empty() {
             return true;
         }
-    }
 
-    false
+        if self.case_insensitive {
+            let name_cmp = name.to_lowercase();
+            let exclude = self.exclude_ci.as_deref().unwrap_or(&[]);
+            for pattern in exclude {
+                if glob_match(pattern, &name_cmp) {
+                    return false;
+                }
+            }
+
+            let patterns = self.patterns_ci.as_deref().unwrap_or(&[]);
+            if patterns.is_empty() {
+                return true;
+            }
+
+            for pattern in patterns {
+                if glob_match(pattern, &name_cmp) {
+                    return true;
+                }
+            }
+
+            false
+        } else {
+            for pattern in self.exclude {
+                if glob_match(pattern, name) {
+                    return false;
+                }
+            }
+
+            if self.patterns.is_empty() {
+                return true;
+            }
+
+            for pattern in self.patterns {
+                if glob_match(pattern, name) {
+                    return true;
+                }
+            }
+
+            false
+        }
+    }
 }
 
 /// Convert ZIP DateTime format to Rust SystemTime.

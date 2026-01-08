@@ -25,10 +25,11 @@ use clap::Parser;
 use memmap2::Mmap;
 use std::fs::File;
 use std::io::{Cursor, Read, Seek};
+use std::sync::Arc;
 use zip::ZipArchive;
 
 use unzip::args::Args;
-use unzip::extract::{extract_archive, extract_to_pipe};
+use unzip::extract::{ArchiveSource, extract_archive, extract_archive_threaded, extract_to_pipe};
 use unzip::linux::{fadvise_sequential, madvise_sequential};
 use unzip::list::{display_comment, list_contents};
 use unzip::test_archive::test_archive;
@@ -40,6 +41,13 @@ fn main() -> Result<()> {
     if args.overwrite && args.never_overwrite {
         bail!("Cannot specify both -o (overwrite) and -n (never overwrite)");
     }
+
+    let is_extract = !args.zipinfo.is_some()
+        && !args.comment_only
+        && !args.list_only
+        && !args.verbose
+        && !args.test
+        && !args.pipe;
 
     let file = File::open(&args.zipfile)
         .with_context(|| format!("Failed to open ZIP file: {}", args.zipfile.display()))?;
@@ -55,17 +63,27 @@ fn main() -> Result<()> {
         // Linux optimization: tell kernel we'll read sequentially
         madvise_sequential(mmap.as_ptr(), mmap.len());
 
-        let cursor = Cursor::new(&mmap[..]);
-        let mut archive = ZipArchive::new(cursor)
-            .with_context(|| format!("Failed to read ZIP archive: {}", args.zipfile.display()))?;
-        run_command(&mut archive, &args)
+        if is_extract {
+            let source = ArchiveSource::Mmap(Arc::new(mmap));
+            extract_archive_threaded(source, &args)
+        } else {
+            let cursor = Cursor::new(&mmap[..]);
+            let mut archive = ZipArchive::new(cursor)
+                .with_context(|| format!("Failed to read ZIP archive: {}", args.zipfile.display()))?;
+            run_command(&mut archive, &args)
+        }
     } else {
         // For smaller files, still hint sequential access
         fadvise_sequential(&file, file_size);
 
-        let mut archive = ZipArchive::new(file)
-            .with_context(|| format!("Failed to read ZIP archive: {}", args.zipfile.display()))?;
-        run_command(&mut archive, &args)
+        if is_extract {
+            let source = ArchiveSource::FilePath(args.zipfile.clone());
+            extract_archive_threaded(source, &args)
+        } else {
+            let mut archive = ZipArchive::new(file)
+                .with_context(|| format!("Failed to read ZIP archive: {}", args.zipfile.display()))?;
+            run_command(&mut archive, &args)
+        }
     }
 }
 

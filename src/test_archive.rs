@@ -33,7 +33,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use zip::ZipArchive;
 
 use crate::args::Args;
-use crate::utils::should_extract;
+use crate::utils::PatternMatcher;
 
 /// Test ZIP archive integrity by verifying CRC32 checksums for all files.
 ///
@@ -73,6 +73,8 @@ pub fn test_archive<R: Read + Seek>(archive: &mut ZipArchive<R>, args: &Args) ->
     let total_files = archive.len();
     let errors = AtomicUsize::new(0);
     let tested = AtomicUsize::new(0);
+    let matcher = PatternMatcher::new(&args.patterns, &args.exclude, args.case_insensitive);
+    let mut buffer = vec![0u8; 256 * 1024];
 
     let progress_bar = if args.quiet == 0 {
         let pb = ProgressBar::new(total_files as u64);
@@ -90,21 +92,33 @@ pub fn test_archive<R: Read + Seek>(archive: &mut ZipArchive<R>, args: &Args) ->
         let mut file = archive.by_index(i)?;
         let name = file.name().to_string();
 
-        if !should_extract(&name, &args.patterns, &args.exclude, args.case_insensitive) {
+        if !matcher.should_extract(&name) {
             if let Some(ref pb) = progress_bar {
                 pb.inc(1);
             }
             continue;
         }
 
-        let mut buffer = Vec::new();
-        if let Err(e) = file.read_to_end(&mut buffer) {
+        let mut hasher = crc32fast::Hasher::new();
+        let mut read_error: Option<anyhow::Error> = None;
+        loop {
+            match file.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(n) => hasher.update(&buffer[..n]),
+                Err(e) => {
+                    read_error = Some(e.into());
+                    break;
+                },
+            }
+        }
+
+        if let Some(e) = read_error {
             if args.quiet < 2 {
                 eprintln!("error: {} - {}", name, e);
             }
             errors.fetch_add(1, Ordering::Relaxed);
         } else {
-            let computed_crc = crc32fast::hash(&buffer);
+            let computed_crc = hasher.finalize();
             let stored_crc = file.crc32();
 
             if computed_crc != stored_crc {

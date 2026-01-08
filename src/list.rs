@@ -28,10 +28,146 @@
 //! ```
 
 use anyhow::Result;
-use std::io::{Read, Seek};
+use std::io::{Read, Seek, Write};
 use zip::ZipArchive;
 
-use crate::utils::{format_datetime, format_size};
+
+struct DateTimeCache {
+    last: Option<zip::DateTime>,
+    buf: [u8; 19],
+}
+
+impl DateTimeCache {
+    fn new() -> Self {
+        Self {
+            last: None,
+            buf: [b' '; 19],
+        }
+    }
+
+    fn as_str(&mut self, datetime: Option<zip::DateTime>) -> &str {
+        match datetime {
+            Some(dt) => {
+                if self.last != Some(dt) {
+                    let (y, m, d, h, min, s) = (
+                        dt.year(),
+                        dt.month(),
+                        dt.day(),
+                        dt.hour(),
+                        dt.minute(),
+                        dt.second(),
+                    );
+                    self.buf[0] = b'0' + (y / 1000 % 10) as u8;
+                    self.buf[1] = b'0' + (y / 100 % 10) as u8;
+                    self.buf[2] = b'0' + (y / 10 % 10) as u8;
+                    self.buf[3] = b'0' + (y % 10) as u8;
+                    self.buf[4] = b'-';
+                    self.buf[5] = b'0' + (m / 10 % 10) as u8;
+                    self.buf[6] = b'0' + (m % 10) as u8;
+                    self.buf[7] = b'-';
+                    self.buf[8] = b'0' + (d / 10 % 10) as u8;
+                    self.buf[9] = b'0' + (d % 10) as u8;
+                    self.buf[10] = b' ';
+                    self.buf[11] = b'0' + (h / 10 % 10) as u8;
+                    self.buf[12] = b'0' + (h % 10) as u8;
+                    self.buf[13] = b':';
+                    self.buf[14] = b'0' + (min / 10 % 10) as u8;
+                    self.buf[15] = b'0' + (min % 10) as u8;
+                    self.buf[16] = b':';
+                    self.buf[17] = b'0' + (s / 10 % 10) as u8;
+                    self.buf[18] = b'0' + (s % 10) as u8;
+                    self.last = Some(dt);
+                }
+                unsafe { std::str::from_utf8_unchecked(&self.buf) }
+            },
+            None => "                   ",
+        }
+    }
+}
+
+fn write_u64(buf: &mut [u8; 32], mut value: u64) -> usize {
+    let mut tmp = [0u8; 20];
+    let mut idx = 0;
+    if value == 0 {
+        tmp[idx] = b'0';
+        idx += 1;
+    } else {
+        while value > 0 {
+            tmp[idx] = b'0' + (value % 10) as u8;
+            value /= 10;
+            idx += 1;
+        }
+    }
+    for i in 0..idx {
+        buf[i] = tmp[idx - 1 - i];
+    }
+    idx
+}
+
+fn write_hex_u32(buf: &mut [u8; 8], value: u32) {
+    let mut v = value;
+    for i in (0..8).rev() {
+        let digit = (v & 0xF) as u8;
+        buf[i] = match digit {
+            0..=9 => b'0' + digit,
+            _ => b'a' + (digit - 10),
+        };
+        v >>= 4;
+    }
+}
+
+fn write_right_aligned(out: &mut dyn Write, s: &str, width: usize) -> Result<()> {
+    let len = s.len();
+    if len < width {
+        for _ in 0..(width - len) {
+            out.write_all(b" ")?;
+        }
+    }
+    out.write_all(s.as_bytes())?;
+    Ok(())
+}
+
+fn size_to_str<'a>(buf: &'a mut [u8; 32], size: u64) -> &'a str {
+    const KB: u64 = 1024;
+    const MB: u64 = KB * 1024;
+    const GB: u64 = MB * 1024;
+
+    let mut pos = 0;
+    if size >= GB {
+        let scaled = size * 10 / GB;
+        pos += write_u64(buf, scaled / 10);
+        buf[pos] = b'.';
+        pos += 1;
+        buf[pos] = b'0' + (scaled % 10) as u8;
+        pos += 1;
+        buf[pos] = b'G';
+        pos += 1;
+    } else if size >= MB {
+        let scaled = size * 10 / MB;
+        pos += write_u64(buf, scaled / 10);
+        buf[pos] = b'.';
+        pos += 1;
+        buf[pos] = b'0' + (scaled % 10) as u8;
+        pos += 1;
+        buf[pos] = b'M';
+        pos += 1;
+    } else if size >= KB {
+        let scaled = size * 10 / KB;
+        pos += write_u64(buf, scaled / 10);
+        buf[pos] = b'.';
+        pos += 1;
+        buf[pos] = b'0' + (scaled % 10) as u8;
+        pos += 1;
+        buf[pos] = b'K';
+        pos += 1;
+    } else {
+        pos += write_u64(buf, size);
+        buf[pos] = b'B';
+        pos += 1;
+    }
+
+    unsafe { std::str::from_utf8_unchecked(&buf[..pos]) }
+}
 
 /// Display the ZIP archive comment if present.
 ///
@@ -59,9 +195,11 @@ use crate::utils::{format_datetime, format_size};
 /// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
 pub fn display_comment<R: Read + Seek>(archive: &mut ZipArchive<R>) -> Result<()> {
+    let stdout = std::io::stdout();
+    let mut out = std::io::BufWriter::new(stdout.lock());
     let comment = archive.comment();
     if !comment.is_empty() {
-        println!("{}", String::from_utf8_lossy(comment));
+        writeln!(&mut out, "{}", String::from_utf8_lossy(comment))?;
     }
     Ok(())
 }
@@ -104,15 +242,22 @@ pub fn display_comment<R: Read + Seek>(archive: &mut ZipArchive<R>) -> Result<()
 /// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
 pub fn list_contents<R: Read + Seek>(archive: &mut ZipArchive<R>, verbose: bool) -> Result<()> {
+    let stdout = std::io::stdout();
+    let mut out = std::io::BufWriter::new(stdout.lock());
+    let mut datetime_cache = DateTimeCache::new();
+    let mut size_buf = [0u8; 32];
+    let mut num_buf = [0u8; 32];
+    let mut crc_buf = [0u8; 8];
     if verbose {
-        println!(
+        writeln!(
+            &mut out,
             "{:>8}  {:>8}  {:>5}  {:>19}  {:>8}  Name",
             "Length", "Size", "Ratio", "Date & Time", "CRC-32"
-        );
-        println!("{}", "-".repeat(80));
+        )?;
+        writeln!(&mut out, "{}", "-".repeat(80))?;
     } else {
-        println!("{:>10}  {:>19}  Name", "Size", "Modified");
-        println!("{:->10}  {:->19}  {:->40}", "", "", "");
+        writeln!(&mut out, "{:>10}  {:>19}  Name", "Size", "Modified")?;
+        writeln!(&mut out, "{:->10}  {:->19}  {:->40}", "", "", "")?;
     }
 
     let mut total_size: u64 = 0;
@@ -120,14 +265,14 @@ pub fn list_contents<R: Read + Seek>(archive: &mut ZipArchive<R>, verbose: bool)
     let mut file_count = 0;
 
     for i in 0..archive.len() {
-        let file = archive.by_index(i)?;
+        let file = archive.by_index_raw(i)?;
         let size = file.size();
         let compressed = file.compressed_size();
         total_size += size;
         total_compressed += compressed;
         file_count += 1;
 
-        let datetime_str = format_datetime(file.last_modified());
+        let datetime_str = datetime_cache.as_str(file.last_modified());
         let name = file.name();
 
         if verbose {
@@ -136,30 +281,66 @@ pub fn list_contents<R: Read + Seek>(archive: &mut ZipArchive<R>, verbose: bool)
             } else {
                 0
             };
-            let crc = file.crc32();
-            println!(
-                "{:>8}  {:>8}  {:>4}%  {}  {:08x}  {}",
-                size, compressed, ratio, datetime_str, crc, name
-            );
+            let size_len = write_u64(&mut num_buf, size);
+            write_right_aligned(&mut out, unsafe {
+                std::str::from_utf8_unchecked(&num_buf[..size_len])
+            }, 8)?;
+            out.write_all(b"  ")?;
+
+            let comp_len = write_u64(&mut num_buf, compressed);
+            write_right_aligned(&mut out, unsafe {
+                std::str::from_utf8_unchecked(&num_buf[..comp_len])
+            }, 8)?;
+            out.write_all(b"  ")?;
+
+            let ratio_len = write_u64(&mut num_buf, ratio as u64);
+            write_right_aligned(&mut out, unsafe {
+                std::str::from_utf8_unchecked(&num_buf[..ratio_len])
+            }, 4)?;
+            out.write_all(b"%  ")?;
+
+            out.write_all(datetime_str.as_bytes())?;
+            out.write_all(b"  ")?;
+
+            write_hex_u32(&mut crc_buf, file.crc32());
+            out.write_all(&crc_buf)?;
+            out.write_all(b"  ")?;
+
+            out.write_all(name.as_bytes())?;
+            out.write_all(b"\n")?;
         } else {
-            println!("{:>10}  {}  {}", format_size(size), datetime_str, name);
+            let size_str = size_to_str(&mut size_buf, size);
+            write_right_aligned(&mut out, size_str, 10)?;
+            out.write_all(b"  ")?;
+            out.write_all(datetime_str.as_bytes())?;
+            out.write_all(b"  ")?;
+            out.write_all(name.as_bytes())?;
+            out.write_all(b"\n")?;
         }
     }
 
     if verbose {
-        println!("{}", "-".repeat(80));
+        writeln!(&mut out, "{}", "-".repeat(80))?;
         let ratio = if total_size > 0 {
             100 - (total_compressed * 100 / total_size)
         } else {
             0
         };
-        println!(
+        writeln!(
+            &mut out,
             "{:>8}  {:>8}  {:>4}%  {:>19}  {:>8}  {} files",
             total_size, total_compressed, ratio, "", "", file_count
-        );
+        )?;
     } else {
-        println!("{:->10}  {:->19}  {:->40}", "", "", "");
-        println!("{:>10}  {:>19}  {} files", format_size(total_size), "", file_count);
+        writeln!(&mut out, "{:->10}  {:->19}  {:->40}", "", "", "")?;
+        let total_str = size_to_str(&mut size_buf, total_size);
+        write_right_aligned(&mut out, total_str, 10)?;
+        out.write_all(b"  ")?;
+        out.write_all(b"                   ")?;
+        out.write_all(b"  ")?;
+        let count_len = write_u64(&mut num_buf, file_count as u64);
+        out.write_all(unsafe { std::str::from_utf8_unchecked(&num_buf[..count_len]) }.as_bytes())?;
+        out.write_all(b" files\n")?;
     }
 
     Ok(())

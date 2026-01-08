@@ -48,7 +48,7 @@ pub mod utils;
 pub mod zipinfo;
 
 pub use args::Args;
-pub use extract::extract_archive;
+pub use extract::{ArchiveSource, extract_archive, extract_archive_threaded};
 pub use glob::glob_match;
 pub use list::{display_comment, list_contents};
 pub use test_archive::test_archive;
